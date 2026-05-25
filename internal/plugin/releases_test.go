@@ -1,147 +1,261 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 The semrel Authors
+// SPDX-FileCopyrightText: 2026 The provider-gitlab Authors
 
-package plugin_test
+package plugin
 
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	gitlab "github.com/SemRels/provider-gitlab/internal/plugin"
+	"time"
 )
 
-func newTestClient(t *testing.T, srv *httptest.Server) *gitlab.Client {
-	t.Helper()
-	return gitlab.NewClient(gitlab.Config{
-		BaseURL:   srv.URL,
-		Token:     "test-token",
-		ProjectID: "42",
+func TestConfigFromLookupEnvUsesDefaultsAndFallbacks(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromLookupEnv(func(key string) (string, bool) {
+		values := map[string]string{
+			"SEMREL_PLUGIN_TOKEN": " secret-token ",
+			"CI_PROJECT_ID":       "12345",
+			"SEMREL_TAG_NAME":     "v1.2.3",
+			"SEMREL_CHANGELOG":    "## Notes\n- shipped",
+			"SEMREL_BRANCH":       "main",
+		}
+		value, ok := values[key]
+		return value, ok
 	})
+
+	if cfg.BaseURL != defaultBaseURL {
+		t.Fatalf("expected default base URL %q, got %q", defaultBaseURL, cfg.BaseURL)
+	}
+	if cfg.Token != "secret-token" {
+		t.Fatalf("expected trimmed token, got %q", cfg.Token)
+	}
+	if cfg.ProjectID != "12345" {
+		t.Fatalf("expected CI project fallback, got %q", cfg.ProjectID)
+	}
+	if cfg.TagName != "v1.2.3" || cfg.Name != "v1.2.3" {
+		t.Fatalf("expected tag-based release naming, got tag=%q name=%q", cfg.TagName, cfg.Name)
+	}
+	if cfg.Description != "## Notes\n- shipped" {
+		t.Fatalf("expected changelog description, got %q", cfg.Description)
+	}
+	if cfg.Branch != "main" {
+		t.Fatalf("expected branch main, got %q", cfg.Branch)
+	}
 }
 
-func TestCreateRelease_Success(t *testing.T) {
+func TestConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "missing token",
+			cfg:  Config{BaseURL: defaultBaseURL, ProjectID: "42", TagName: "v1.2.3", Name: "v1.2.3"},
+			want: "SEMREL_PLUGIN_TOKEN is required",
+		},
+		{
+			name: "missing project",
+			cfg:  Config{BaseURL: defaultBaseURL, Token: "token", TagName: "v1.2.3", Name: "v1.2.3"},
+			want: "SEMREL_PLUGIN_PROJECT_ID or CI_PROJECT_ID is required",
+		},
+		{
+			name: "missing tag",
+			cfg:  Config{BaseURL: defaultBaseURL, Token: "token", ProjectID: "42"},
+			want: "SEMREL_TAG_NAME is required",
+		},
+		{
+			name: "missing name",
+			cfg:  Config{BaseURL: defaultBaseURL, Token: "token", ProjectID: "42", TagName: "v1.2.3"},
+			want: "release name is required",
+		},
+		{
+			name: "invalid base url",
+			cfg:  Config{BaseURL: "://bad", Token: "token", ProjectID: "42", TagName: "v1.2.3", Name: "v1.2.3"},
+			want: "SEMREL_PLUGIN_BASE_URL must be a valid absolute URL",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tc.cfg.Validate()
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestNewUsesDefaults(t *testing.T) {
+	t.Parallel()
+
+	creator := New(Config{Token: "token", ProjectID: "group/project", TagName: "v1.2.3", Name: "v1.2.3"})
+
+	if creator.baseURL != defaultBaseURL {
+		t.Fatalf("expected default base URL, got %q", creator.baseURL)
+	}
+	if creator.projectID != "group%2Fproject" {
+		t.Fatalf("expected escaped project ID, got %q", creator.projectID)
+	}
+	if creator.httpClient == nil || creator.httpClient.Timeout != defaultTimeout {
+		t.Fatalf("expected default timeout %s, got %#v", defaultTimeout, creator.httpClient)
+	}
+}
+
+func TestCreateReleaseSuccess(t *testing.T) {
+	t.Parallel()
+
+	type releaseRequest struct {
+		TagName     string `json:"tag_name"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Ref         string `json:"ref,omitempty"`
+	}
+
+	requests := make(chan releaseRequest, 1)
+	headers := make(chan string, 1)
+	paths := make(chan string, 1)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
+		defer r.Body.Close()
+
+		var req releaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
 		}
-		if r.Header.Get("PRIVATE-TOKEN") != "test-token" {
-			t.Error("expected PRIVATE-TOKEN header")
-		}
-		rel := map[string]string{
-			"name":     "Release v1.2.3",
-			"tag_name": "v1.2.3",
-		}
+
+		requests <- req
+		headers <- r.Header.Get("PRIVATE-TOKEN")
+		paths <- r.URL.EscapedPath()
+
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(rel)
+		_ = json.NewEncoder(w).Encode(Release{TagName: req.TagName, Name: req.Name, Description: req.Description})
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv)
-	rel, err := c.CreateRelease(context.Background(), gitlab.CreateReleaseRequest{
-		Name:        "Release v1.2.3",
+	creator := New(Config{
+		BaseURL:     srv.URL + "/",
+		Token:       "test-token",
+		ProjectID:   "group/project",
 		TagName:     "v1.2.3",
-		Description: "## Changelog\n- feature A",
+		Name:        "v1.2.3",
+		Description: "## Changelog\n- added",
+		Branch:      "release/main",
+		HTTPClient:  srv.Client(),
 	})
+
+	release, err := creator.CreateRelease(context.Background())
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("CreateRelease returned error: %v", err)
 	}
-	if rel.TagName != "v1.2.3" {
-		t.Errorf("expected tag_name v1.2.3, got %q", rel.TagName)
+
+	gotRequest := <-requests
+	if gotRequest.TagName != "v1.2.3" || gotRequest.Name != "v1.2.3" || gotRequest.Description != "## Changelog\n- added" || gotRequest.Ref != "release/main" {
+		t.Fatalf("unexpected request payload: %+v", gotRequest)
 	}
-}
-
-func TestCreateRelease_Error(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		w.Write([]byte(`{"message":"tag not found"}`))
-	}))
-	defer srv.Close()
-
-	c := newTestClient(t, srv)
-	_, err := c.CreateRelease(context.Background(), gitlab.CreateReleaseRequest{
-		Name:    "v9.9.9",
-		TagName: "v9.9.9",
-	})
-	if err == nil {
-		t.Fatal("expected error for 422 response")
+	if gotHeader := <-headers; gotHeader != "test-token" {
+		t.Fatalf("expected PRIVATE-TOKEN header, got %q", gotHeader)
+	}
+	if gotPath := <-paths; gotPath != "/api/v4/projects/group%2Fproject/releases" {
+		t.Fatalf("unexpected request path %q", gotPath)
+	}
+	if release.TagName != "v1.2.3" {
+		t.Fatalf("expected release tag v1.2.3, got %q", release.TagName)
 	}
 }
 
-func TestAddReleaseLink_Success(t *testing.T) {
+func TestCreateReleaseOmitsRefWhenBranchUnset(t *testing.T) {
+	t.Parallel()
+
+	bodyContainsRef := make(chan bool, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.Path, "/links") {
-			t.Errorf("expected /links path, got %s", r.URL.Path)
+		defer r.Body.Close()
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
 		}
+		bodyContainsRef <- strings.Contains(string(payload), "\"ref\"")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"name": "myapp"})
+		_ = json.NewEncoder(w).Encode(Release{TagName: "v1.2.3", Name: "v1.2.3"})
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv)
-	err := c.AddReleaseLink(context.Background(), "v1.2.3", gitlab.ReleaseLink{
-		Name:     "myapp-linux-amd64.tar.gz",
-		URL:      "https://example.com/myapp-v1.2.3-linux-amd64.tar.gz",
-		LinkType: "package",
+	creator := New(Config{
+		BaseURL:    srv.URL,
+		Token:      "test-token",
+		ProjectID:  "42",
+		TagName:    "v1.2.3",
+		Name:       "v1.2.3",
+		HTTPClient: srv.Client(),
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+
+	if _, err := creator.CreateRelease(context.Background()); err != nil {
+		t.Fatalf("CreateRelease returned error: %v", err)
+	}
+	if <-bodyContainsRef {
+		t.Fatal("expected ref to be omitted when branch is unset")
 	}
 }
 
-func TestAddReleaseLink_Error(t *testing.T) {
+func TestCreateReleaseReturnsStatusError(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"bad request"}`))
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv)
-	err := c.AddReleaseLink(context.Background(), "v9.9.9", gitlab.ReleaseLink{
-		Name: "asset",
-		URL:  "https://example.com/asset",
+	creator := New(Config{
+		BaseURL:    srv.URL,
+		Token:      "test-token",
+		ProjectID:  "42",
+		TagName:    "v1.2.3",
+		Name:       "v1.2.3",
+		HTTPClient: srv.Client(),
 	})
-	if err == nil {
-		t.Error("expected error for 404 response")
+
+	_, err := creator.CreateRelease(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "status 400") {
+		t.Fatalf("expected status error, got %v", err)
 	}
 }
 
-func TestUploadPackageFile_Success(t *testing.T) {
+func TestCreateReleaseHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut {
-			t.Errorf("expected PUT, got %s", r.Method)
-		}
-		if !strings.Contains(r.URL.Path, "myapp") {
-			t.Errorf("expected package name in path, got %s", r.URL.Path)
-		}
+		time.Sleep(100 * time.Millisecond)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"message": "201 Created"})
+		_ = json.NewEncoder(w).Encode(Release{TagName: "v1.2.3", Name: "v1.2.3"})
 	}))
 	defer srv.Close()
 
-	// Create a temp file to upload
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "myapp-v1.0.0-linux-amd64.tar.gz")
-	os.WriteFile(filePath, []byte("fake archive content"), 0o644)
-
-	c := newTestClient(t, srv)
-	downloadURL, err := c.UploadPackageFile(context.Background(), "myapp", "v1.0.0", filePath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if downloadURL == "" {
-		t.Error("expected non-empty download URL")
-	}
-}
-
-func TestNewClient_Defaults(t *testing.T) {
-	c := gitlab.NewClient(gitlab.Config{
-		Token:     "tok",
-		ProjectID: "mygroup/myproject",
+	creator := New(Config{
+		BaseURL:    srv.URL,
+		Token:      "test-token",
+		ProjectID:  "42",
+		TagName:    "v1.2.3",
+		Name:       "v1.2.3",
+		HTTPClient: srv.Client(),
 	})
-	_ = c
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := creator.CreateRelease(ctx)
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
 }

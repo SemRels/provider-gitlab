@@ -1,43 +1,34 @@
 # provider-gitlab
 
-GitLab provider plugin for Semantic Release.
+`provider-gitlab` is the SemRels subprocess plugin for creating GitLab releases.
 
-Provides GitLab repository, release, and metadata integration for Semantic Release.
+## Behavior
 
-## Documentation
+The plugin reads SemRel release context from environment variables, validates its configuration, respects `SEMREL_DRY_RUN`, and creates a release with the GitLab REST API.
 
-- Docs (coming soon): <https://github.com/SemRels/semrel/tree/main/docs/plugins/provider-gitlab>
-- Template source: <https://github.com/SemRels/plugin-template>
+Required plugin configuration:
+
+- `SEMREL_PLUGIN_TOKEN`
+- `SEMREL_PLUGIN_PROJECT_ID` (or `CI_PROJECT_ID`)
+- `SEMREL_TAG_NAME`
+
+Optional configuration:
+
+- `SEMREL_PLUGIN_BASE_URL` (defaults to `https://gitlab.com`)
+- `SEMREL_BRANCH` (sent as `ref` when present)
+- `SEMREL_CHANGELOG` (used as the release description)
 
 ## Repository Layout
 
-`	ext
-cmd/plugin/              Plugin entry point
-internal/plugin/         Business logic scaffold
-internal/grpc/           gRPC transport scaffold
-proto/v1                 Symlink to the SemRel protobuf contract
+```
+cmd/plugin/              Subprocess plugin entrypoint
+internal/plugin/         GitLab release creation logic
 .github/workflows/       CI, release, and security automation
-`
+```
 
 ## Development
 
-`ash
+```
 go build ./cmd/plugin
 go test ./...
-`
-
-## Configuration Example
-
-`yaml
-plugins:
-  - name: provider-gitlab
-    type: provider
-    config:
-      api_url: https://gitlab.com/api/v4
-      project_id: group/example-repo
-      token: ${GITLAB_TOKEN}
-`
-
-## Status
-
-This repository is bootstrapped from SemRels/plugin-template and is ready for implementation.
+```

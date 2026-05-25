@@ -1,195 +1,188 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 The semrel Authors
+// SPDX-FileCopyrightText: 2026 The provider-gitlab Authors
 
-// Package plugin provides a GitLab Releases publisher plugin.
-// It creates releases, uploads release assets (generic packages), and attaches
-// links to the GitLab Releases API.
+// Package plugin provides a subprocess SemRel plugin that creates GitLab releases.
 package plugin
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
-const defaultTimeout = 30 * time.Second
-const defaultBaseURL = "https://gitlab.com"
+const (
+	defaultBaseURL = "https://gitlab.com"
+	defaultTimeout = 30 * time.Second
+)
 
-// Client interacts with the GitLab Releases API.
-type Client struct {
-	baseURL    string
-	token      string
-	projectID  string
-	httpClient *http.Client
-}
-
-// Config holds the configuration for the GitLab client.
+// Config contains the GitLab release settings sourced from the SemRel environment.
 type Config struct {
-	// BaseURL is the GitLab instance URL (defaults to https://gitlab.com).
-	BaseURL string
-	// Token is a GitLab personal access token or project access token.
-	Token string
-	// ProjectID is the numeric project ID or URL-encoded project path
-	// (e.g., "42" or "mygroup%2Fmyproject").
-	ProjectID string
-	// Timeout is the HTTP client timeout (defaults to 30s).
-	Timeout time.Duration
+	BaseURL     string
+	Token       string
+	ProjectID   string
+	TagName     string
+	Name        string
+	Description string
+	Branch      string
+	HTTPClient  *http.Client
 }
 
-// NewClient creates a Client with the provided configuration.
-func NewClient(cfg Config) *Client {
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = defaultBaseURL
-	}
-	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
-	t := cfg.Timeout
-	if t == 0 {
-		t = defaultTimeout
-	}
-	return &Client{
-		baseURL:    cfg.BaseURL,
-		token:      cfg.Token,
-		projectID:  url.PathEscape(cfg.ProjectID),
-		httpClient: &http.Client{Timeout: t},
-	}
-}
-
-// Release represents a GitLab release.
+// Release represents the subset of the GitLab release response used by the plugin.
 type Release struct {
-	Name        string    `json:"name"`
-	TagName     string    `json:"tag_name"`
-	Description string    `json:"description"`
-	ReleasedAt  time.Time `json:"released_at,omitempty"`
-}
-
-// CreateReleaseRequest is the payload for creating a release.
-type CreateReleaseRequest struct {
-	Name        string `json:"name"`
 	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
-// ReleaseLink represents a link attachment for a release.
-type ReleaseLink struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	LinkType string `json:"link_type,omitempty"` // "runbook", "package", "image", "other"
+// Creator creates GitLab releases.
+type Creator struct {
+	baseURL     string
+	token       string
+	projectID   string
+	tagName     string
+	name        string
+	description string
+	branch      string
+	httpClient  *http.Client
 }
 
-// CreateRelease creates a new GitLab release for the given tag.
-func (c *Client) CreateRelease(ctx context.Context, req CreateReleaseRequest) (*Release, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("gitlab: marshal create release: %w", err)
+type createReleaseRequest struct {
+	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Ref         string `json:"ref,omitempty"`
+}
+
+// ConfigFromEnv loads plugin configuration from the SemRel subprocess environment.
+func ConfigFromEnv() Config {
+	return ConfigFromLookupEnv(os.LookupEnv)
+}
+
+// ConfigFromLookupEnv loads plugin configuration from the provided environment lookup.
+func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
+	baseURL := strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_BASE_URL"))
+	if baseURL == "" {
+		baseURL = defaultBaseURL
 	}
 
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases", c.baseURL, c.projectID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	projectID := strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_PROJECT_ID"))
+	if projectID == "" {
+		projectID = strings.TrimSpace(envValue(lookupEnv, "CI_PROJECT_ID"))
+	}
+
+	tagName := strings.TrimSpace(envValue(lookupEnv, "SEMREL_TAG_NAME"))
+
+	return Config{
+		BaseURL:     baseURL,
+		Token:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_TOKEN")),
+		ProjectID:   projectID,
+		TagName:     tagName,
+		Name:        tagName,
+		Description: envValue(lookupEnv, "SEMREL_CHANGELOG"),
+		Branch:      strings.TrimSpace(envValue(lookupEnv, "SEMREL_BRANCH")),
+	}
+}
+
+// Validate reports missing or malformed configuration.
+func (c Config) Validate() error {
+	if strings.TrimSpace(c.Token) == "" {
+		return errors.New("SEMREL_PLUGIN_TOKEN is required")
+	}
+	if strings.TrimSpace(c.ProjectID) == "" {
+		return errors.New("SEMREL_PLUGIN_PROJECT_ID or CI_PROJECT_ID is required")
+	}
+	if strings.TrimSpace(c.TagName) == "" {
+		return errors.New("SEMREL_TAG_NAME is required")
+	}
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("release name is required")
+	}
+
+	parsedURL, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return fmt.Errorf("SEMREL_PLUGIN_BASE_URL must be a valid absolute URL")
+	}
+
+	return nil
+}
+
+// New returns a GitLab release creator.
+func New(cfg Config) *Creator {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultTimeout}
+	}
+
+	return &Creator{
+		baseURL:     baseURL,
+		token:       strings.TrimSpace(cfg.Token),
+		projectID:   url.PathEscape(strings.TrimSpace(cfg.ProjectID)),
+		tagName:     strings.TrimSpace(cfg.TagName),
+		name:        strings.TrimSpace(cfg.Name),
+		description: cfg.Description,
+		branch:      strings.TrimSpace(cfg.Branch),
+		httpClient:  httpClient,
+	}
+}
+
+// CreateRelease creates a GitLab release from the current SemRel context.
+func (c *Creator) CreateRelease(ctx context.Context) (*Release, error) {
+	payload := createReleaseRequest{
+		TagName:     c.tagName,
+		Name:        c.name,
+		Description: c.description,
+		Ref:         c.branch,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("gitlab: marshal release request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v4/projects/%s/releases", c.baseURL, c.projectID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("gitlab: create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("PRIVATE-TOKEN", c.token)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("gitlab: create release: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("gitlab: create release: status %d: %s", resp.StatusCode, respBody)
-	}
-
-	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("gitlab: decode release: %w", err)
-	}
-	return &rel, nil
-}
-
-// AddReleaseLink attaches a link to an existing release.
-func (c *Client) AddReleaseLink(ctx context.Context, tagName string, link ReleaseLink) error {
-	body, err := json.Marshal(link)
-	if err != nil {
-		return fmt.Errorf("gitlab: marshal link: %w", err)
-	}
-
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases/%s/assets/links",
-		c.baseURL, c.projectID, url.PathEscape(tagName))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("gitlab: create link request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("PRIVATE-TOKEN", c.token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("gitlab: add release link: %w", err)
+		return nil, fmt.Errorf("gitlab: create release: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("gitlab: add link: status %d: %s", resp.StatusCode, respBody)
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("gitlab: create release: status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
-	return nil
+
+	var release Release
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, fmt.Errorf("gitlab: decode release response: %w", err)
+	}
+
+	return &release, nil
 }
 
-// UploadPackageFile uploads a file to the GitLab Generic Packages registry and
-// returns the download URL suitable for use as a release asset link.
-func (c *Client) UploadPackageFile(ctx context.Context, packageName, version, filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", fmt.Errorf("gitlab: open file: %w", err)
+func envValue(lookupEnv func(string) (string, bool), key string) string {
+	value, ok := lookupEnv(key)
+	if !ok {
+		return ""
 	}
-	defer f.Close()
-
-	fileName := filepath.Base(filePath)
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	fw, err := w.CreateFormFile("file", fileName)
-	if err != nil {
-		return "", fmt.Errorf("gitlab: create form file: %w", err)
-	}
-	if _, err := io.Copy(fw, f); err != nil {
-		return "", fmt.Errorf("gitlab: copy file: %w", err)
-	}
-	w.Close()
-
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/packages/generic/%s/%s/%s",
-		c.baseURL, c.projectID,
-		url.PathEscape(packageName),
-		url.PathEscape(version),
-		url.PathEscape(fileName))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, &buf)
-	if err != nil {
-		return "", fmt.Errorf("gitlab: create upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	req.Header.Set("PRIVATE-TOKEN", c.token)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gitlab: upload package file: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("gitlab: upload: status %d: %s", resp.StatusCode, respBody)
-	}
-	return apiURL, nil
+	return value
 }
