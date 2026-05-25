@@ -6,7 +6,7 @@ package grpc
 import (
 	"context"
 
-	semrelplugin "github.com/SemRels/plugin-template/internal/plugin"
+	semrelplugin "github.com/SemRels/provider-gitlab/internal/plugin"
 )
 
 // HealthResponse is a lightweight stand-in until generated protobuf bindings are wired in.
