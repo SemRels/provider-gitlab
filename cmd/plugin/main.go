@@ -23,7 +23,7 @@ func main() {
 }
 
 func run(parent context.Context, stdout, stderr io.Writer, lookupEnv func(string) (string, bool)) int {
-	fmt.Fprintf(stderr, "plugin_schema_version=%d\n", pluginSchemaVersion)
+	_, _ = fmt.Fprintf(stderr, "plugin_schema_version=%d\n", pluginSchemaVersion)
 	cfg := plugin.ConfigFromLookupEnv(lookupEnv)
 	if err := cfg.Validate(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "provider-gitlab: %v\n", err)
