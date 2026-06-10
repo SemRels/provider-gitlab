@@ -60,7 +60,7 @@ func TestRunDryRun(t *testing.T) {
 	if !strings.Contains(stdout.String(), "[dry-run] would create GitLab release v1.2.3") {
 		t.Fatalf("expected dry-run message, got %q", stdout.String())
 	}
-	if stderr.Len() != 0 {
+	if stderr.String() != "plugin_schema_version=1\n" {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
 }
@@ -101,7 +101,7 @@ func TestRunCreateReleaseSuccess(t *testing.T) {
 	if !strings.Contains(stdout.String(), "created GitLab release v1.2.3") {
 		t.Fatalf("expected success message, got %q", stdout.String())
 	}
-	if stderr.Len() != 0 {
+	if stderr.String() != "plugin_schema_version=1\n" {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
 }
