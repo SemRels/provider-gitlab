@@ -1,6 +1,6 @@
 # provider-gitlab
 
-[![Latest Release](https://img.shields.io/github/v/release/SemRels/provider-gitlab?label=version\&color=blue)](https://github.com/SemRels/provider-gitlab/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/SemRels/provider-gitlab?label=version&color=blue)](https://github.com/SemRels/provider-gitlab/releases/latest)
 
 Publishes the semrel release to GitLab.
 
