@@ -30,7 +30,6 @@ cosign verify ghcr.io/semrels/provider-gitlab:latest \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-
 ## Configuration
 
 ```yaml
@@ -44,14 +43,24 @@ plugins:
       SEMREL_PLUGIN_MILESTONE: "v{{ .Version }}"
 ```
 
+When running in GitLab CI, the plugin can authenticate with `CI_JOB_TOKEN` by sending a `JOB-TOKEN` header instead of `PRIVATE-TOKEN`. If both a private token and a job token are available, the private token still takes precedence.
+
 ## `SEMREL_PLUGIN_*` variables
 
 | Name | Required | Description | Default |
 | --- | --- | --- | --- |
-| `SEMREL_PLUGIN_TOKEN` | Required | GitLab API token. | None |
+| `SEMREL_PLUGIN_TOKEN` | Optional | GitLab private token sent as the `PRIVATE-TOKEN` header. Takes precedence over job-token auth. | None |
+| `SEMREL_PLUGIN_JOB_TOKEN` | Optional | Explicit GitLab job token sent as the `JOB-TOKEN` header when no private token is configured. | None |
+| `SEMREL_PLUGIN_USE_JOB_TOKEN` | Optional | Set to `true` to opt into job-token auth in CI; the plugin then uses `SEMREL_PLUGIN_JOB_TOKEN` or falls back to `CI_JOB_TOKEN` if present. | `false` |
 | `SEMREL_PLUGIN_BASE_URL` | Optional | Base URL of the GitLab instance. | https://gitlab.com |
 | `SEMREL_PLUGIN_PROJECT_ID` | Optional | GitLab project ID. Defaults from the git remote when available. | Derived from git remote |
 | `SEMREL_PLUGIN_MILESTONE` | Optional | Milestone name to associate with the release. | None |
+
+Authentication precedence:
+
+1. `SEMREL_PLUGIN_TOKEN` → `PRIVATE-TOKEN`
+2. `SEMREL_PLUGIN_JOB_TOKEN` or `SEMREL_PLUGIN_USE_JOB_TOKEN=true` with `CI_JOB_TOKEN` → `JOB-TOKEN`
+3. `CI_JOB_TOKEN` → `JOB-TOKEN`
 
 ## `SEMREL_*` release context used
 

@@ -32,6 +32,9 @@ func TestConfigFromLookupEnvUsesDefaultsAndFallbacks(t *testing.T) {
 	if cfg.BaseURL != defaultBaseURL {
 		t.Fatalf("expected default base URL %q, got %q", defaultBaseURL, cfg.BaseURL)
 	}
+	if cfg.AuthHeader != "PRIVATE-TOKEN" {
+		t.Fatalf("expected PRIVATE-TOKEN auth header, got %q", cfg.AuthHeader)
+	}
 	if cfg.Token != "secret-token" {
 		t.Fatalf("expected trimmed token, got %q", cfg.Token)
 	}
@@ -60,7 +63,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing token",
 			cfg:  Config{BaseURL: defaultBaseURL, ProjectID: "42", TagName: "v1.2.3", Name: "v1.2.3"},
-			want: "SEMREL_PLUGIN_TOKEN is required",
+			want: "SEMREL_PLUGIN_TOKEN, SEMREL_PLUGIN_JOB_TOKEN, or CI_JOB_TOKEN is required",
 		},
 		{
 			name: "missing project",
@@ -105,6 +108,9 @@ func TestNewUsesDefaults(t *testing.T) {
 	if creator.baseURL != defaultBaseURL {
 		t.Fatalf("expected default base URL, got %q", creator.baseURL)
 	}
+	if creator.authHeader != "PRIVATE-TOKEN" {
+		t.Fatalf("expected default PRIVATE-TOKEN auth header, got %q", creator.authHeader)
+	}
 	if creator.projectID != "group%2Fproject" {
 		t.Fatalf("expected escaped project ID, got %q", creator.projectID)
 	}
@@ -124,7 +130,8 @@ func TestCreateReleaseSuccess(t *testing.T) {
 	}
 
 	requests := make(chan releaseRequest, 1)
-	headers := make(chan string, 1)
+	headerNames := make(chan string, 1)
+	headerValues := make(chan string, 1)
 	paths := make(chan string, 1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +143,13 @@ func TestCreateReleaseSuccess(t *testing.T) {
 		}
 
 		requests <- req
-		headers <- r.Header.Get("PRIVATE-TOKEN")
+		if value := r.Header.Get("PRIVATE-TOKEN"); value != "" {
+			headerNames <- "PRIVATE-TOKEN"
+			headerValues <- value
+		} else {
+			headerNames <- "JOB-TOKEN"
+			headerValues <- r.Header.Get("JOB-TOKEN")
+		}
 		paths <- r.URL.EscapedPath()
 
 		w.WriteHeader(http.StatusCreated)
@@ -146,6 +159,7 @@ func TestCreateReleaseSuccess(t *testing.T) {
 
 	creator := New(Config{
 		BaseURL:     srv.URL + "/",
+		AuthHeader:  "PRIVATE-TOKEN",
 		Token:       "test-token",
 		ProjectID:   "group/project",
 		TagName:     "v1.2.3",
@@ -164,8 +178,11 @@ func TestCreateReleaseSuccess(t *testing.T) {
 	if gotRequest.TagName != "v1.2.3" || gotRequest.Name != "v1.2.3" || gotRequest.Description != "## Changelog\n- added" || gotRequest.Ref != "release/main" {
 		t.Fatalf("unexpected request payload: %+v", gotRequest)
 	}
-	if gotHeader := <-headers; gotHeader != "test-token" {
-		t.Fatalf("expected PRIVATE-TOKEN header, got %q", gotHeader)
+	if gotHeaderName := <-headerNames; gotHeaderName != "PRIVATE-TOKEN" {
+		t.Fatalf("expected PRIVATE-TOKEN header name, got %q", gotHeaderName)
+	}
+	if gotHeaderValue := <-headerValues; gotHeaderValue != "test-token" {
+		t.Fatalf("expected PRIVATE-TOKEN header value, got %q", gotHeaderValue)
 	}
 	if gotPath := <-paths; gotPath != "/api/v4/projects/group%2Fproject/releases" {
 		t.Fatalf("unexpected request path %q", gotPath)
@@ -193,6 +210,7 @@ func TestCreateReleaseOmitsRefWhenBranchUnset(t *testing.T) {
 
 	creator := New(Config{
 		BaseURL:    srv.URL,
+		AuthHeader: "PRIVATE-TOKEN",
 		Token:      "test-token",
 		ProjectID:  "42",
 		TagName:    "v1.2.3",
@@ -219,6 +237,7 @@ func TestCreateReleaseReturnsStatusError(t *testing.T) {
 
 	creator := New(Config{
 		BaseURL:    srv.URL,
+		AuthHeader: "PRIVATE-TOKEN",
 		Token:      "test-token",
 		ProjectID:  "42",
 		TagName:    "v1.2.3",
@@ -244,6 +263,7 @@ func TestCreateReleaseHonorsContextCancellation(t *testing.T) {
 
 	creator := New(Config{
 		BaseURL:    srv.URL,
+		AuthHeader: "PRIVATE-TOKEN",
 		Token:      "test-token",
 		ProjectID:  "42",
 		TagName:    "v1.2.3",
@@ -257,5 +277,113 @@ func TestCreateReleaseHonorsContextCancellation(t *testing.T) {
 	_, err := creator.CreateRelease(ctx)
 	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
+func TestAuthHeaderPrecedence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantName string
+		wantVal  string
+	}{
+		{
+			name: "private token wins",
+			env: map[string]string{
+				"SEMREL_PLUGIN_TOKEN":         "private-token",
+				"SEMREL_PLUGIN_JOB_TOKEN":     "job-token",
+				"SEMREL_PLUGIN_USE_JOB_TOKEN": "true",
+				"CI_JOB_TOKEN":                "ci-job-token",
+			},
+			wantName: "PRIVATE-TOKEN",
+			wantVal:  "private-token",
+		},
+		{
+			name: "explicit job token works",
+			env: map[string]string{
+				"SEMREL_PLUGIN_JOB_TOKEN":     "job-token",
+				"SEMREL_PLUGIN_USE_JOB_TOKEN": "true",
+			},
+			wantName: "JOB-TOKEN",
+			wantVal:  "job-token",
+		},
+		{
+			name: "ci job token fallback works",
+			env: map[string]string{
+				"CI_JOB_TOKEN": "ci-job-token",
+			},
+			wantName: "JOB-TOKEN",
+			wantVal:  "ci-job-token",
+		},
+		{
+			name: "job token opt in uses ci job token",
+			env: map[string]string{
+				"SEMREL_PLUGIN_USE_JOB_TOKEN": "true",
+				"CI_JOB_TOKEN":                "ci-job-token",
+			},
+			wantName: "JOB-TOKEN",
+			wantVal:  "ci-job-token",
+		},
+		{
+			name: "missing tokens",
+			env:  map[string]string{},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotName, gotVal := authHeader(func(key string) (string, bool) {
+				value, ok := tc.env[key]
+				return value, ok
+			})
+
+			if gotName != tc.wantName || gotVal != tc.wantVal {
+				t.Fatalf("expected (%q, %q), got (%q, %q)", tc.wantName, tc.wantVal, gotName, gotVal)
+			}
+		})
+	}
+}
+
+func TestCreateReleaseUsesJobTokenHeader(t *testing.T) {
+	t.Parallel()
+
+	headerNames := make(chan string, 1)
+	headerValues := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if value := r.Header.Get("PRIVATE-TOKEN"); value != "" {
+			headerNames <- "PRIVATE-TOKEN"
+			headerValues <- value
+		} else {
+			headerNames <- "JOB-TOKEN"
+			headerValues <- r.Header.Get("JOB-TOKEN")
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Release{TagName: "v1.2.3", Name: "v1.2.3"})
+	}))
+	defer srv.Close()
+
+	creator := New(Config{
+		BaseURL:    srv.URL,
+		AuthHeader: "JOB-TOKEN",
+		Token:      "job-token",
+		ProjectID:  "42",
+		TagName:    "v1.2.3",
+		Name:       "v1.2.3",
+		HTTPClient: srv.Client(),
+	})
+
+	if _, err := creator.CreateRelease(context.Background()); err != nil {
+		t.Fatalf("CreateRelease returned error: %v", err)
+	}
+	if got := <-headerNames; got != "JOB-TOKEN" {
+		t.Fatalf("expected JOB-TOKEN header name, got %q", got)
+	}
+	if got := <-headerValues; got != "job-token" {
+		t.Fatalf("expected JOB-TOKEN header value, got %q", got)
 	}
 }
