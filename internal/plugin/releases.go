@@ -26,6 +26,7 @@ const (
 // Config contains the GitLab release settings sourced from the SemRel environment.
 type Config struct {
 	BaseURL     string
+	AuthHeader  string
 	Token       string
 	ProjectID   string
 	TagName     string
@@ -45,6 +46,7 @@ type Release struct {
 // Creator creates GitLab releases.
 type Creator struct {
 	baseURL     string
+	authHeader  string
 	token       string
 	projectID   string
 	tagName     string
@@ -79,10 +81,12 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 	}
 
 	tagName := strings.TrimSpace(envValue(lookupEnv, "SEMREL_TAG_NAME"))
+	authHeaderName, authHeaderValue := authHeader(lookupEnv)
 
 	return Config{
 		BaseURL:     baseURL,
-		Token:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_TOKEN")),
+		AuthHeader:  authHeaderName,
+		Token:       authHeaderValue,
 		ProjectID:   projectID,
 		TagName:     tagName,
 		Name:        tagName,
@@ -94,7 +98,7 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 // Validate reports missing or malformed configuration.
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Token) == "" {
-		return errors.New("SEMREL_PLUGIN_TOKEN is required")
+		return errors.New("SEMREL_PLUGIN_TOKEN, SEMREL_PLUGIN_JOB_TOKEN, or CI_JOB_TOKEN is required")
 	}
 	if strings.TrimSpace(c.ProjectID) == "" {
 		return errors.New("SEMREL_PLUGIN_PROJECT_ID or CI_PROJECT_ID is required")
@@ -120,6 +124,10 @@ func New(cfg Config) *Creator {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
+	authHeaderName := strings.TrimSpace(cfg.AuthHeader)
+	if authHeaderName == "" && strings.TrimSpace(cfg.Token) != "" {
+		authHeaderName = "PRIVATE-TOKEN"
+	}
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -128,6 +136,7 @@ func New(cfg Config) *Creator {
 
 	return &Creator{
 		baseURL:     baseURL,
+		authHeader:  authHeaderName,
 		token:       strings.TrimSpace(cfg.Token),
 		projectID:   url.PathEscape(strings.TrimSpace(cfg.ProjectID)),
 		tagName:     strings.TrimSpace(cfg.TagName),
@@ -158,7 +167,7 @@ func (c *Creator) CreateRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("gitlab: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("PRIVATE-TOKEN", c.token)
+	req.Header.Set(c.authHeader, c.token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -185,4 +194,27 @@ func envValue(lookupEnv func(string) (string, bool), key string) string {
 		return ""
 	}
 	return value
+}
+
+func authHeader(lookupEnv func(string) (string, bool)) (name, value string) {
+	if token := strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_TOKEN")); token != "" {
+		return "PRIVATE-TOKEN", token
+	}
+	if token := strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_JOB_TOKEN")); token != "" {
+		return "JOB-TOKEN", token
+	}
+	if envBool(lookupEnv, "SEMREL_PLUGIN_USE_JOB_TOKEN") {
+		if token := strings.TrimSpace(envValue(lookupEnv, "CI_JOB_TOKEN")); token != "" {
+			return "JOB-TOKEN", token
+		}
+		return "", ""
+	}
+	if token := strings.TrimSpace(envValue(lookupEnv, "CI_JOB_TOKEN")); token != "" {
+		return "JOB-TOKEN", token
+	}
+	return "", ""
+}
+
+func envBool(lookupEnv func(string) (string, bool), key string) bool {
+	return strings.EqualFold(strings.TrimSpace(envValue(lookupEnv, key)), "true")
 }

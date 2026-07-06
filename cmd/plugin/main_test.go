@@ -32,7 +32,7 @@ func TestRunReturnsValidationError(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("expected empty stdout, got %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "SEMREL_PLUGIN_TOKEN is required") {
+	if !strings.Contains(stderr.String(), "SEMREL_PLUGIN_TOKEN, SEMREL_PLUGIN_JOB_TOKEN, or CI_JOB_TOKEN is required") {
 		t.Fatalf("expected validation error, got %q", stderr.String())
 	}
 }
