@@ -135,7 +135,7 @@ func TestCreateReleaseSuccess(t *testing.T) {
 	paths := make(chan string, 1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 
 		var req releaseRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -197,7 +197,7 @@ func TestCreateReleaseOmitsRefWhenBranchUnset(t *testing.T) {
 
 	bodyContainsRef := make(chan bool, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		payload, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
