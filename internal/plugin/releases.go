@@ -99,7 +99,7 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 		Name:         tagName,
 		Description:  envValue(lookupEnv, "SEMREL_CHANGELOG"),
 		Branch:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_BRANCH")),
-		CommentOnMRs: commentOnMRs != nil && *commentOnMRs,
+		CommentOnMRs: commentOnMRs == nil || *commentOnMRs,
 		ProjectURL:   strings.TrimRight(strings.TrimSpace(envValue(lookupEnv, "CI_PROJECT_URL")), "/"),
 	}
 	if commentErr != nil {

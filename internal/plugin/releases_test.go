@@ -51,6 +51,30 @@ func TestConfigFromLookupEnvUsesDefaultsAndFallbacks(t *testing.T) {
 	if cfg.Branch != "main" {
 		t.Fatalf("expected branch main, got %q", cfg.Branch)
 	}
+	if !cfg.CommentOnMRs {
+		t.Fatal("expected merge request comments to be enabled by default")
+	}
+}
+
+func TestConfigFromLookupEnvCanDisableMergeRequestComments(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromLookupEnv(func(key string) (string, bool) {
+		values := map[string]string{
+			"SEMREL_PLUGIN_TOKEN":          "token",
+			"CI_PROJECT_ID":                "42",
+			"SEMREL_TAG_NAME":              "v1.2.3",
+			"SEMREL_PLUGIN_COMMENT_ON_MRS": "false",
+		}
+		value, ok := values[key]
+		return value, ok
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate() error = %v", err)
+	}
+	if cfg.CommentOnMRs {
+		t.Fatal("expected merge request comments to be disabled")
+	}
 }
 
 func TestConfigValidate(t *testing.T) {
