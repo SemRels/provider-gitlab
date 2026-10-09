@@ -41,6 +41,7 @@ plugins:
       SEMREL_PLUGIN_BASE_URL: "https://gitlab.com"
       SEMREL_PLUGIN_PROJECT_ID: "12345"
       SEMREL_PLUGIN_MILESTONE: "v{{ .Version }}"
+      SEMREL_PLUGIN_COMMENT_ON_MRS: "true"
 ```
 
 When running in GitLab CI, the plugin can authenticate with `CI_JOB_TOKEN` by sending a `JOB-TOKEN` header instead of `PRIVATE-TOKEN`. If both a private token and a job token are available, the private token still takes precedence.
@@ -55,6 +56,7 @@ When running in GitLab CI, the plugin can authenticate with `CI_JOB_TOKEN` by se
 | `SEMREL_PLUGIN_BASE_URL` | Optional | Base URL of the GitLab instance. | https://gitlab.com |
 | `SEMREL_PLUGIN_PROJECT_ID` | Optional | GitLab project ID. Defaults from the git remote when available. | Derived from git remote |
 | `SEMREL_PLUGIN_MILESTONE` | Optional | Milestone name to associate with the release. | None |
+| `SEMREL_PLUGIN_COMMENT_ON_MRS` | Optional | Comment on merge requests associated with commits in the release. Defaults to true; set to `false` to disable. The token needs API access to read commits and create merge request notes. | true |
 
 Authentication precedence:
 
@@ -73,7 +75,7 @@ Authentication precedence:
 
 ## Example behavior
 
-The plugin creates a GitLab release entry for the current tag and can attach the generated changelog and milestone metadata.
+The plugin creates a GitLab release entry for the current tag and can attach the generated changelog and milestone metadata. By default it posts an idempotent release note to associated merge requests. Set `SEMREL_PLUGIN_COMMENT_ON_MRS` to `false` to disable notes.
 
 ## License
 
