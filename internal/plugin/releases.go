@@ -34,6 +34,7 @@ type Config struct {
 	Name             string
 	Description      string
 	Branch           string
+	DryRun           bool
 	CommentOnMRs     bool
 	CommitHashes     []string
 	ProjectURL       string
@@ -87,6 +88,12 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 	}
 
 	tagName := strings.TrimSpace(envValue(lookupEnv, "SEMREL_TAG_NAME"))
+	if tagName == "" {
+		tagName = strings.TrimSpace(envValue(lookupEnv, "SEMREL_VERSION"))
+	}
+	if tagName == "" {
+		tagName = strings.TrimSpace(envValue(lookupEnv, "SEMREL_NEXT_VERSION"))
+	}
 	authHeaderName, authHeaderValue := authHeader(lookupEnv)
 	commentOnMRs, commentErr := parsePluginBool(envValue(lookupEnv, "SEMREL_PLUGIN_COMMENT_ON_MRS"))
 
@@ -99,6 +106,7 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 		Name:         tagName,
 		Description:  envValue(lookupEnv, "SEMREL_CHANGELOG"),
 		Branch:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_BRANCH")),
+		DryRun:       envBool(lookupEnv, "SEMREL_DRY_RUN"),
 		CommentOnMRs: commentOnMRs == nil || *commentOnMRs,
 		ProjectURL:   strings.TrimRight(strings.TrimSpace(envValue(lookupEnv, "CI_PROJECT_URL")), "/"),
 	}
@@ -116,7 +124,7 @@ func (c Config) Validate() error {
 	if c.commentConfigErr != nil {
 		return c.commentConfigErr
 	}
-	if strings.TrimSpace(c.Token) == "" {
+	if !c.DryRun && strings.TrimSpace(c.Token) == "" {
 		return errors.New("SEMREL_PLUGIN_TOKEN, SEMREL_PLUGIN_JOB_TOKEN, or CI_JOB_TOKEN is required")
 	}
 	if strings.TrimSpace(c.ProjectID) == "" {
@@ -320,6 +328,9 @@ func envValue(lookupEnv func(string) (string, bool), key string) string {
 
 func authHeader(lookupEnv func(string) (string, bool)) (name, value string) {
 	if token := strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_TOKEN")); token != "" {
+		return "PRIVATE-TOKEN", token
+	}
+	if token := strings.TrimSpace(envValue(lookupEnv, "GITLAB_TOKEN")); token != "" {
 		return "PRIVATE-TOKEN", token
 	}
 	if token := strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_JOB_TOKEN")); token != "" {
