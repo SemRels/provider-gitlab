@@ -32,7 +32,18 @@ func run(parent context.Context, stdout, stderr io.Writer, lookupEnv func(string
 	}
 
 	if isDryRun(lookupEnv) {
+		if strings.TrimSpace(cfg.Token) == "" {
+			_, _ = fmt.Fprintln(stderr, "[dry-run] provider-gitlab: would need GITLAB_TOKEN (or SEMREL_PLUGIN_TOKEN / CI_JOB_TOKEN) to create release")
+		}
+		_, _ = fmt.Fprintf(stderr, "[dry-run] provider-gitlab: would create release %s for project %s\n", cfg.TagName, cfg.ProjectID)
 		_, _ = fmt.Fprintf(stdout, "[dry-run] would create GitLab release %s for project %s\n", cfg.TagName, cfg.ProjectID)
+		_, _ = fmt.Fprintf(stdout, "tag: %s\ntitle: %s\ntarget: %s/api/v4/projects/%s/releases\n", cfg.TagName, cfg.Name, strings.TrimRight(cfg.BaseURL, "/"), cfg.ProjectID)
+		if assets := strings.TrimSpace(valueFromEnv(lookupEnv, "SEMREL_PLUGIN_ASSETS", "")); assets != "" {
+			_, _ = fmt.Fprintf(stdout, "assets: %s\n", assets)
+		}
+		if cfg.Description != "" {
+			_, _ = fmt.Fprintf(stdout, "notes:\n%s\n", cfg.Description)
+		}
 		return 0
 	}
 
