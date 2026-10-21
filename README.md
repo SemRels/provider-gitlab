@@ -38,29 +38,31 @@ cosign verify ghcr.io/semrels/provider-gitlab:latest \
 
 ```yaml
 plugins:
-  - name: provider-gitlab
-    path: ~/.semrel/plugins/semrel-plugin-provider-gitlab
-    env:
-      SEMREL_PLUGIN_TOKEN: "${GITLAB_TOKEN}"
-      SEMREL_PLUGIN_BASE_URL: "https://gitlab.com"
-      SEMREL_PLUGIN_PROJECT_ID: "12345"
-      SEMREL_PLUGIN_MILESTONE: "v{{ .Version }}"
-      SEMREL_PLUGIN_COMMENT_ON_MRS: "true"
+  - uses: "@semrel/provider-gitlab"
+    phase: release
+    args:
+      token: "${GITLAB_TOKEN}"
+      base_url: "https://gitlab.com"
+      project_id: "12345"
+      milestone: "v{{ .Version }}"
+      comment_on_mrs: "true"
 ```
 
 When running in GitLab CI, the plugin can authenticate with `CI_JOB_TOKEN` by sending a `JOB-TOKEN` header instead of `PRIVATE-TOKEN`. If both a private token and a job token are available, the private token still takes precedence.
 
-## `SEMREL_PLUGIN_*` variables
+## Options
 
-| Name | Required | Description | Default |
-| --- | --- | --- | --- |
-| `SEMREL_PLUGIN_TOKEN` | Optional | GitLab private token sent as the `PRIVATE-TOKEN` header. Takes precedence over job-token auth. | None |
-| `SEMREL_PLUGIN_JOB_TOKEN` | Optional | Explicit GitLab job token sent as the `JOB-TOKEN` header when no private token is configured. | None |
-| `SEMREL_PLUGIN_USE_JOB_TOKEN` | Optional | Set to `true` to opt into job-token auth in CI; the plugin then uses `SEMREL_PLUGIN_JOB_TOKEN` or falls back to `CI_JOB_TOKEN` if present. | `false` |
-| `SEMREL_PLUGIN_BASE_URL` | Optional | Base URL of the GitLab instance. | https://gitlab.com |
-| `SEMREL_PLUGIN_PROJECT_ID` | Optional | GitLab project ID. Defaults from the git remote when available. | Derived from git remote |
-| `SEMREL_PLUGIN_MILESTONE` | Optional | Milestone name to associate with the release. | None |
-| `SEMREL_PLUGIN_COMMENT_ON_MRS` | Optional | Comment on merge requests associated with commits in the release. Defaults to true; set to `false` to disable. The token needs API access to read commits and create merge request notes. | true |
+Every option can be set as an entry under `args` in `.semrel.yaml`. semrel passes each entry to the plugin as the environment variable shown in the table, so you can also set that variable directly (for example in your CI environment) instead of using `args`.
+
+| Argument | Environment variable | Required | Description | Default |
+| --- | --- | --- | --- | --- |
+| `token` | `SEMREL_PLUGIN_TOKEN` | Optional | GitLab private token sent as the `PRIVATE-TOKEN` header. Takes precedence over job-token auth. | None |
+| `job_token` | `SEMREL_PLUGIN_JOB_TOKEN` | Optional | Explicit GitLab job token sent as the `JOB-TOKEN` header when no private token is configured. | None |
+| `use_job_token` | `SEMREL_PLUGIN_USE_JOB_TOKEN` | Optional | Set to `true` to opt into job-token auth in CI; the plugin then uses `SEMREL_PLUGIN_JOB_TOKEN` or falls back to `CI_JOB_TOKEN` if present. | `false` |
+| `base_url` | `SEMREL_PLUGIN_BASE_URL` | Optional | Base URL of the GitLab instance. | https://gitlab.com |
+| `project_id` | `SEMREL_PLUGIN_PROJECT_ID` | Optional | GitLab project ID. Defaults from the git remote when available. | Derived from git remote |
+| `milestone` | `SEMREL_PLUGIN_MILESTONE` | Optional | Milestone name to associate with the release. | None |
+| `comment_on_mrs` | `SEMREL_PLUGIN_COMMENT_ON_MRS` | Optional | Comment on merge requests associated with commits in the release. Defaults to true; set to `false` to disable. The token needs API access to read commits and create merge request notes. | true |
 
 Authentication precedence:
 
