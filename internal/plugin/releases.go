@@ -301,7 +301,7 @@ func (c *Creator) uploadProjectAsset(ctx context.Context, path string) (string, 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader)
 	if err != nil {
 		_ = reader.Close()
-		<-writeDone
+		_ = <-writeDone
 		return "", fmt.Errorf("build upload request: %w", err)
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
@@ -309,7 +309,7 @@ func (c *Creator) uploadProjectAsset(ctx context.Context, path string) (string, 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		_ = reader.Close()
-		<-writeDone
+		_ = <-writeDone
 		return "", fmt.Errorf("send upload request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -328,9 +328,9 @@ func (c *Creator) uploadProjectAsset(ctx context.Context, path string) (string, 
 	if err := json.NewDecoder(resp.Body).Decode(&uploaded); err != nil {
 		return "", fmt.Errorf("decode upload response: %w", err)
 	}
-	location := uploaded.URL
-	if location == "" {
-		location = uploaded.FullPath
+	location := uploaded.FullPath
+	if location == "" && c.projectURL != "" && strings.HasPrefix(uploaded.URL, "/uploads/") {
+		location = c.projectURL + uploaded.URL
 	}
 	assetURL, err := url.Parse(location)
 	if err != nil || location == "" {

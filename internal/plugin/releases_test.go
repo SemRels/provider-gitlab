@@ -255,7 +255,9 @@ func TestCreateReleaseUploadsAndAttachesConfiguredAssets(t *testing.T) {
 				t.Errorf("uploaded content = %q", data)
 			}
 			uploadSeen = true
-			_ = json.NewEncoder(w).Encode(map[string]string{"url": "/uploads/release/sbom.json"})
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"url": "/uploads/release/sbom.json", "full_path": "/-/project/42/uploads/release/sbom.json",
+			})
 		case "/api/v4/projects/42/releases/v1.2.3/assets/links":
 			var payload struct {
 				Name string `json:"name"`
@@ -264,7 +266,7 @@ func TestCreateReleaseUploadsAndAttachesConfiguredAssets(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode link: %v", err)
 			}
-			if payload.Name != "sbom.json" || payload.URL != server.URL+"/uploads/release/sbom.json" {
+			if payload.Name != "sbom.json" || payload.URL != server.URL+"/-/project/42/uploads/release/sbom.json" {
 				t.Errorf("release link payload = %+v", payload)
 			}
 			linkSeen = true
