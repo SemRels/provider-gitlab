@@ -31,7 +31,7 @@ func run(parent context.Context, stdout, stderr io.Writer, lookupEnv func(string
 		return 1
 	}
 
-	if isDryRun(lookupEnv) {
+	if cfg.DryRun {
 		if strings.TrimSpace(cfg.Token) == "" {
 			_, _ = fmt.Fprintln(stderr, "[dry-run] provider-gitlab: would need GITLAB_TOKEN (or SEMREL_PLUGIN_TOKEN / CI_JOB_TOKEN) to create release")
 		}
@@ -63,10 +63,6 @@ func run(parent context.Context, stdout, stderr io.Writer, lookupEnv func(string
 
 	_, _ = fmt.Fprintf(stdout, "created GitLab release %s\n", release.TagName)
 	return 0
-}
-
-func isDryRun(lookupEnv func(string) (string, bool)) bool {
-	return strings.EqualFold(strings.TrimSpace(valueFromEnv(lookupEnv, "SEMREL_DRY_RUN", "")), "true")
 }
 
 func valueFromEnv(lookupEnv func(string) (string, bool), key, fallback string) string {

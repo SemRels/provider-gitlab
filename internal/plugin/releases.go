@@ -96,6 +96,7 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 	}
 	authHeaderName, authHeaderValue := authHeader(lookupEnv)
 	commentOnMRs, commentErr := parsePluginBool(envValue(lookupEnv, "SEMREL_PLUGIN_COMMENT_ON_MRS"))
+	dryRunValue := strings.TrimSpace(envValue(lookupEnv, "SEMREL_DRY_RUN"))
 
 	cfg := Config{
 		BaseURL:      baseURL,
@@ -106,7 +107,7 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 		Name:         tagName,
 		Description:  envValue(lookupEnv, "SEMREL_CHANGELOG"),
 		Branch:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_BRANCH")),
-		DryRun:       envBool(lookupEnv, "SEMREL_DRY_RUN"),
+		DryRun:       strings.EqualFold(dryRunValue, "true") || dryRunValue == "1",
 		CommentOnMRs: commentOnMRs == nil || *commentOnMRs,
 		ProjectURL:   strings.TrimRight(strings.TrimSpace(envValue(lookupEnv, "CI_PROJECT_URL")), "/"),
 	}

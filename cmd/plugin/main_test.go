@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -50,7 +51,7 @@ func TestRunDryRun(t *testing.T) {
 			"SEMREL_PLUGIN_PROJECT_ID": "42",
 			"SEMREL_TAG_NAME":          "v1.2.3",
 			"SEMREL_CHANGELOG":         "## 1.2.3\n- notes",
-			"SEMREL_DRY_RUN":           "true",
+			"SEMREL_DRY_RUN":           "TrUe",
 		}
 		value, ok := values[key]
 		return value, ok
@@ -99,6 +100,38 @@ func TestRunDryRunWithoutToken(t *testing.T) {
 		!strings.Contains(stdout.String(), "release notes") ||
 		!strings.Contains(stdout.String(), "dist/*.tar.gz") {
 		t.Fatalf("unexpected stdout %q", stdout.String())
+	}
+}
+
+func TestNumericDryRunDoesNotCreateRelease(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"tag_name":"v1.2.3"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout, stderr bytes.Buffer
+	values := map[string]string{
+		"SEMREL_PLUGIN_BASE_URL":       server.URL,
+		"SEMREL_PLUGIN_TOKEN":          "token",
+		"SEMREL_PLUGIN_PROJECT_ID":     "42",
+		"SEMREL_PLUGIN_COMMENT_ON_MRS": "false",
+		"SEMREL_TAG_NAME":              "v1.2.3",
+		"SEMREL_DRY_RUN":               "1",
+	}
+	code := run(context.Background(), &stdout, &stderr, func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	if requests.Load() != 0 {
+		t.Fatalf("dry-run made %d HTTP requests", requests.Load())
+	}
+	if code != 0 || !strings.Contains(stdout.String(), "[dry-run]") {
+		t.Fatalf("dry-run code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -215,16 +248,12 @@ func TestHelpers(t *testing.T) {
 
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{
-			"SEMREL_DRY_RUN": "TrUe",
-			"VALUE":          "x",
+			"VALUE": "x",
 		}
 		value, ok := values[key]
 		return value, ok
 	}
 
-	if !isDryRun(lookup) {
-		t.Fatal("expected dry run to be true")
-	}
 	if got := valueFromEnv(lookup, "VALUE", "fallback"); got != "x" {
 		t.Fatalf("expected value x, got %q", got)
 	}
