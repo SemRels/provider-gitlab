@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -34,6 +36,7 @@ type Config struct {
 	Name             string
 	Description      string
 	Branch           string
+	Assets           string
 	CommentOnMRs     bool
 	CommitHashes     []string
 	ProjectURL       string
@@ -58,6 +61,7 @@ type Creator struct {
 	name        string
 	description string
 	branch      string
+	assets      string
 	projectURL  string
 	httpClient  *http.Client
 }
@@ -99,6 +103,7 @@ func ConfigFromLookupEnv(lookupEnv func(string) (string, bool)) Config {
 		Name:         tagName,
 		Description:  envValue(lookupEnv, "SEMREL_CHANGELOG"),
 		Branch:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_BRANCH")),
+		Assets:       strings.TrimSpace(envValue(lookupEnv, "SEMREL_PLUGIN_ASSETS")),
 		CommentOnMRs: commentOnMRs == nil || *commentOnMRs,
 		ProjectURL:   strings.TrimRight(strings.TrimSpace(envValue(lookupEnv, "CI_PROJECT_URL")), "/"),
 	}
@@ -162,6 +167,7 @@ func New(cfg Config) *Creator {
 		name:        strings.TrimSpace(cfg.Name),
 		description: cfg.Description,
 		branch:      strings.TrimSpace(cfg.Branch),
+		assets:      strings.TrimSpace(cfg.Assets),
 		projectURL:  strings.TrimRight(strings.TrimSpace(cfg.ProjectURL), "/"),
 		httpClient:  httpClient,
 	}
@@ -204,8 +210,148 @@ func (c *Creator) CreateRelease(ctx context.Context) (*Release, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return nil, fmt.Errorf("gitlab: decode release response: %w", err)
 	}
+	if err := c.uploadReleaseAssets(ctx); err != nil {
+		return nil, err
+	}
 
 	return &release, nil
+}
+
+func (c *Creator) uploadReleaseAssets(ctx context.Context) error {
+	if c.assets == "" {
+		return nil
+	}
+
+	patterns := splitAssets(c.assets)
+	if len(patterns) == 0 {
+		return fmt.Errorf("gitlab: SEMREL_PLUGIN_ASSETS must contain at least one file path or glob pattern")
+	}
+	seen := make(map[string]struct{})
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("gitlab: invalid asset pattern %q: %w", pattern, err)
+		}
+		if len(matches) == 0 {
+			return fmt.Errorf("gitlab: asset pattern %q matched no files", pattern)
+		}
+		for _, match := range matches {
+			path := filepath.Clean(match)
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			info, err := os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("gitlab: stat asset %q: %w", path, err)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("gitlab: asset %q is not a regular file", path)
+			}
+
+			assetURL, err := c.uploadProjectAsset(ctx, path)
+			if err != nil {
+				return fmt.Errorf("gitlab: upload asset %q: %w", path, err)
+			}
+			payload, err := json.Marshal(struct {
+				Name     string `json:"name"`
+				URL      string `json:"url"`
+				LinkType string `json:"link_type"`
+			}{Name: filepath.Base(path), URL: assetURL, LinkType: "other"})
+			if err != nil {
+				return fmt.Errorf("gitlab: marshal asset link %q: %w", path, err)
+			}
+			endpoint := fmt.Sprintf("%s/api/v4/projects/%s/releases/%s/assets/links",
+				c.baseURL, c.projectID, url.PathEscape(c.tagName))
+			if err := c.requestJSON(ctx, http.MethodPost, endpoint, bytes.NewReader(payload), nil); err != nil {
+				return fmt.Errorf("gitlab: attach asset %q: %w", path, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Creator) uploadProjectAsset(ctx context.Context, path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	reader, writer := io.Pipe()
+	form := multipart.NewWriter(writer)
+	writeDone := make(chan error, 1)
+	go func() {
+		part, writeErr := form.CreateFormFile("file", filepath.Base(path))
+		if writeErr == nil {
+			_, writeErr = io.Copy(part, file)
+		}
+		if closeErr := form.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		if writeErr != nil {
+			_ = writer.CloseWithError(writeErr)
+		} else {
+			_ = writer.Close()
+		}
+		writeDone <- writeErr
+	}()
+
+	endpoint := fmt.Sprintf("%s/api/v4/projects/%s/uploads", c.baseURL, c.projectID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader)
+	if err != nil {
+		_ = reader.Close()
+		<-writeDone
+		return "", fmt.Errorf("build upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	req.Header.Set(c.authHeader, c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		_ = reader.Close()
+		<-writeDone
+		return "", fmt.Errorf("send upload request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if writeErr := <-writeDone; writeErr != nil {
+		return "", fmt.Errorf("write upload body: %w", writeErr)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("unexpected status %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+
+	var uploaded struct {
+		URL      string `json:"url"`
+		FullPath string `json:"full_path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&uploaded); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+	location := uploaded.URL
+	if location == "" {
+		location = uploaded.FullPath
+	}
+	assetURL, err := url.Parse(location)
+	if err != nil || location == "" {
+		return "", fmt.Errorf("upload response did not contain a valid asset URL")
+	}
+	baseURL, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse GitLab base URL: %w", err)
+	}
+	return baseURL.ResolveReference(assetURL).String(), nil
+}
+
+func splitAssets(raw string) []string {
+	parts := strings.Split(raw, ",")
+	patterns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if pattern := strings.TrimSpace(part); pattern != "" {
+			patterns = append(patterns, pattern)
+		}
+	}
+	return patterns
 }
 
 // CommentOnMergeRequests comments on merge requests containing release commits.

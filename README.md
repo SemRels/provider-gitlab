@@ -45,6 +45,7 @@ plugins:
       base_url: "https://gitlab.com"
       project_id: "12345"
       milestone: "v{{ .Version }}"
+      assets: "dist/*.tar.gz,dist/*.zip,dist/*.sbom.json,dist/*.sig"
       comment_on_mrs: "true"
 ```
 
@@ -62,6 +63,7 @@ Every option can be set as an entry under `args` in `.semrel.yaml`. semrel passe
 | `base_url` | `SEMREL_PLUGIN_BASE_URL` | Optional | Base URL of the GitLab instance. | https://gitlab.com |
 | `project_id` | `SEMREL_PLUGIN_PROJECT_ID` | Optional | GitLab project ID. Defaults from the git remote when available. | Derived from git remote |
 | `milestone` | `SEMREL_PLUGIN_MILESTONE` | Optional | Milestone name to associate with the release. | None |
+| `assets` | `SEMREL_PLUGIN_ASSETS` | Optional | Comma-separated file paths or glob patterns. Matching files are uploaded and linked from the release. Every pattern must match; upload failures fail the plugin. | None |
 | `comment_on_mrs` | `SEMREL_PLUGIN_COMMENT_ON_MRS` | Optional | Comment on merge requests associated with commits in the release. Defaults to true; set to `false` to disable. The token needs API access to read commits and create merge request notes. | true |
 
 Authentication precedence:
@@ -81,7 +83,7 @@ Authentication precedence:
 
 ## Example behavior
 
-The plugin creates a GitLab release entry for the current tag and can attach the generated changelog and milestone metadata. By default it posts an idempotent release note to associated merge requests. Set `SEMREL_PLUGIN_COMMENT_ON_MRS` to `false` to disable notes.
+The plugin creates a GitLab release entry for the current tag, uses the generated changelog as its description, and can link a milestone. Files matched by `SEMREL_PLUGIN_ASSETS` are uploaded and attached as release links. A missing match or failed upload returns an error. By default it posts an idempotent release note to associated merge requests. Set `SEMREL_PLUGIN_COMMENT_ON_MRS` to `false` to disable notes.
 
 ## License
 
