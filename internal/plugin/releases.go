@@ -301,16 +301,14 @@ func (c *Creator) uploadProjectAsset(ctx context.Context, path string) (string, 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader)
 	if err != nil {
 		_ = reader.Close()
-		_ = <-writeDone
-		return "", fmt.Errorf("build upload request: %w", err)
+		return "", fmt.Errorf("build upload request: %w", errors.Join(err, <-writeDone))
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	req.Header.Set(c.authHeader, c.token)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		_ = reader.Close()
-		_ = <-writeDone
-		return "", fmt.Errorf("send upload request: %w", err)
+		return "", fmt.Errorf("send upload request: %w", errors.Join(err, <-writeDone))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if writeErr := <-writeDone; writeErr != nil {
