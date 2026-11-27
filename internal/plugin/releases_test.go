@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,11 +22,12 @@ func TestConfigFromLookupEnvUsesDefaultsAndFallbacks(t *testing.T) {
 
 	cfg := ConfigFromLookupEnv(func(key string) (string, bool) {
 		values := map[string]string{
-			"SEMREL_PLUGIN_TOKEN": " secret-token ",
-			"CI_PROJECT_ID":       "12345",
-			"SEMREL_TAG_NAME":     "v1.2.3",
-			"SEMREL_CHANGELOG":    "## Notes\n- shipped",
-			"SEMREL_BRANCH":       "main",
+			"SEMREL_PLUGIN_TOKEN":  " secret-token ",
+			"CI_PROJECT_ID":        "12345",
+			"SEMREL_TAG_NAME":      "v1.2.3",
+			"SEMREL_CHANGELOG":     "## Notes\n- shipped",
+			"SEMREL_BRANCH":        "main",
+			"SEMREL_PLUGIN_ASSETS": "dist/*.zip, CHECKSUMS.txt",
 		}
 		value, ok := values[key]
 		return value, ok
@@ -50,6 +53,9 @@ func TestConfigFromLookupEnvUsesDefaultsAndFallbacks(t *testing.T) {
 	}
 	if cfg.Branch != "main" {
 		t.Fatalf("expected branch main, got %q", cfg.Branch)
+	}
+	if cfg.Assets != "dist/*.zip, CHECKSUMS.txt" {
+		t.Fatalf("expected configured assets, got %q", cfg.Assets)
 	}
 	if !cfg.CommentOnMRs {
 		t.Fatal("expected merge request comments to be enabled by default")
@@ -214,6 +220,97 @@ func TestCreateReleaseSuccess(t *testing.T) {
 	}
 	if release.TagName != "v1.2.3" {
 		t.Fatalf("expected release tag v1.2.3, got %q", release.TagName)
+	}
+}
+
+func TestCreateReleaseUploadsAndAttachesConfiguredAssets(t *testing.T) {
+	assetPath := filepath.Join(t.TempDir(), "sbom.json")
+	if err := os.WriteFile(assetPath, []byte(`{"bomFormat":"CycloneDX"}`), 0o600); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+	var uploadSeen, linkSeen bool
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v4/projects/42/releases":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(Release{TagName: "v1.2.3", Name: "v1.2.3"})
+		case "/api/v4/projects/42/uploads":
+			if r.Header.Get("PRIVATE-TOKEN") != "token" {
+				t.Errorf("PRIVATE-TOKEN = %q", r.Header.Get("PRIVATE-TOKEN"))
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				t.Fatalf("FormFile(file): %v", err)
+			}
+			defer func() { _ = file.Close() }()
+			if header.Filename != "sbom.json" {
+				t.Errorf("filename = %q, want sbom.json", header.Filename)
+			}
+			data, err := io.ReadAll(file)
+			if err != nil {
+				t.Fatalf("read uploaded asset: %v", err)
+			}
+			if string(data) != `{"bomFormat":"CycloneDX"}` {
+				t.Errorf("uploaded content = %q", data)
+			}
+			uploadSeen = true
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"url": "/uploads/release/sbom.json", "full_path": "/-/project/42/uploads/release/sbom.json",
+			})
+		case "/api/v4/projects/42/releases/v1.2.3/assets/links":
+			var payload struct {
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode link: %v", err)
+			}
+			if payload.Name != "sbom.json" || payload.URL != server.URL+"/-/project/42/uploads/release/sbom.json" {
+				t.Errorf("release link payload = %+v", payload)
+			}
+			linkSeen = true
+			w.WriteHeader(http.StatusCreated)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	creator := New(Config{
+		BaseURL:    server.URL,
+		AuthHeader: "PRIVATE-TOKEN",
+		Token:      "token",
+		ProjectID:  "42",
+		TagName:    "v1.2.3",
+		Name:       "v1.2.3",
+		Assets:     assetPath,
+		HTTPClient: server.Client(),
+	})
+	if _, err := creator.CreateRelease(context.Background()); err != nil {
+		t.Fatalf("CreateRelease() error = %v", err)
+	}
+	if !uploadSeen || !linkSeen {
+		t.Fatalf("asset upload/attachment = %v/%v, want true/true", uploadSeen, linkSeen)
+	}
+}
+
+func TestCreateReleaseRejectsUnmatchedAssetPattern(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Release{TagName: "v1.2.3", Name: "v1.2.3"})
+	}))
+	defer server.Close()
+
+	creator := New(Config{
+		BaseURL: server.URL, AuthHeader: "PRIVATE-TOKEN", Token: "token",
+		ProjectID: "42", TagName: "v1.2.3", Name: "v1.2.3",
+		Assets: filepath.Join(t.TempDir(), "missing-*.tar.gz"), HTTPClient: server.Client(),
+	})
+	if _, err := creator.CreateRelease(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "matched no files") {
+		t.Fatalf("CreateRelease() error = %v, want unmatched asset error", err)
 	}
 }
 

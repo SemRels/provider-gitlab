@@ -33,6 +33,9 @@ func run(parent context.Context, stdout, stderr io.Writer, lookupEnv func(string
 
 	if isDryRun(lookupEnv) {
 		_, _ = fmt.Fprintf(stdout, "[dry-run] would create GitLab release %s for project %s\n", cfg.TagName, cfg.ProjectID)
+		if cfg.Assets != "" {
+			_, _ = fmt.Fprintf(stdout, "assets: %s\n", cfg.Assets)
+		}
 		return 0
 	}
 
